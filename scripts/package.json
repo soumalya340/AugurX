@@ -5,9 +5,13 @@
   "license": "MIT",
   "scripts": {
     "deposit": "tsx deposit.ts",
-    "transfer-from-evm": "tsx transfer-from-evm.ts",
-    "transfer-arc-to-base": "tsx transfer-arc-to-base.ts",
-    "balances": "tsx balances.ts"
+    "transfer-arc-to-evm": "tsx transfer-arc-to-evm.ts",
+    "transfer-evm-to-arc": "tsx transfer-evm-to-arc.ts",
+    "balances": "tsx balances.ts",
+    "balance2": "tsx balance2.ts",
+    "vault-balances": "tsx vault_balances.ts",
+    "wallet-balance": "tsx wallet_balance.ts",
+    "crowdfund": "node crowdfund_interact.js"
   },
   "dependencies": {
     "dotenv": "^17.2.4",

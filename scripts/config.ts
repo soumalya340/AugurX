@@ -119,9 +119,7 @@ export function parseSelectedChains(): ChainKey[] {
   const validChains = Object.keys(chainConfigs) as ChainKey[];
 
   if (args.length === 0) {
-    throw new Error(
-      "No chains specified. Usage: npm run <script> <chain1> [chain2...] or 'all'"
-    );
+    return ["arcTestnet"] as ChainKey[]; // default when no chain specified
   }
 
   if (args.length === 1 && args[0] === "all") {
