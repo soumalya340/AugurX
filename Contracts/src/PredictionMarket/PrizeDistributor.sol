@@ -24,7 +24,9 @@ interface IMarket {
 
     function outcomeCount() external view returns (uint256);
 
-    function claimWinnings() external returns (uint256); // Fallback to market direct claim
+    function claimWinnings() external returns (uint256);
+
+    function transferSettlementPool() external;
 }
 
 /**
@@ -97,6 +99,9 @@ contract PrizeDistributor is ReentrancyGuard {
         dist.totalWinningShares = totalWinningShares;
         dist.payoutPerShare = payoutPerShare;
         dist.isDistributed = true;
+
+        // Pull funds from market so claimPrize can transfer from this contract
+        market.transferSettlementPool();
 
         emit DistributionCreated(_marketId, payoutPerShare);
 
