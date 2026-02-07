@@ -1,0 +1,22 @@
+{
+  "name": "scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "deposit": "tsx deposit.ts",
+    "transfer-from-evm": "tsx transfer-from-evm.ts",
+    "transfer-arc-to-base": "tsx transfer-arc-to-base.ts",
+    "balances": "tsx balances.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.4",
+    "ethers": "^6.16.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}
