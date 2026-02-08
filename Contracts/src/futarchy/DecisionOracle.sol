@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "../interfaces/IFutarchy.sol";
+import "./IFutarchy.sol";
 
 /**
  * @title DecisionOracle

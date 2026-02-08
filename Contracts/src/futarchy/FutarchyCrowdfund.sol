@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "../interfaces/IFutarchy.sol";
+import "./IFutarchy.sol";
 import "./DecisionOracle.sol";
 import "./FutarchyEscrow.sol";
 
@@ -17,15 +16,15 @@ interface IPredictionMarketFactory {
         string[2] calldata outcomeNames,
         uint256 resolutionTime,
         uint256 initialB,
-        address settlementLogic,
-        address quoteTokenAddr
+        address settlementLogic
     ) external payable returns (uint256 marketId, address marketAddress);
 }
 
 /**
  * @title FutarchyCrowdfund
  * @notice Orchestrator that merges prediction markets (LMSR) with
- *         milestone-based crowdfunding (PredictionMarketCollab) via futarchy.
+ *         milestone-based crowdfunding via futarchy.
+ *         Uses native token instead of ERC20.
  *
  * Flow:
  *   1. createProposal() — deploys two conditional BinaryMarkets + two FutarchyEscrows
@@ -36,16 +35,6 @@ interface IPredictionMarketFactory {
  *        → Loser market: escrow voided, users refund via cost basis in the market
  *   5. Winner market continues until resolution (metric measured), then settles parimutuel
  *   6. Milestone withdrawals happen in parallel via FutarchyEscrow
- *
- * Architecture:
- *   FutarchyCrowdfund (this contract)
- *   ├── DecisionOracle (TWAP comparison)
- *   ├── Proposal A
- *   │   ├── BinaryMarket (LMSR pricing + trading)
- *   │   └── FutarchyEscrow (milestone-based fund release)
- *   └── Proposal B
- *       ├── BinaryMarket (LMSR pricing + trading)
- *       └── FutarchyEscrow (milestone-based fund release)
  */
 contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
     using Math for uint256;
@@ -98,14 +87,13 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
 
     IPredictionMarketFactory public immutable marketFactory;
     DecisionOracle public immutable oracle;
-    IERC20 public immutable collateralToken;
 
     // Platform config
     uint256 public constant BPS_DENOMINATOR = 10000;
     uint256 public defaultEscrowBps = 7000; // 70% to escrow
     uint256 public defaultSettlementBps = 3000; // 30% stays for settlement
-    uint256 public defaultInitialB = 1e6; // 1 USDC initial b
-    uint256 public defaultStakePercent = 20; // 20% stake like PredictionMarketCollab
+    uint256 public defaultInitialB = 1e6; // 1 unit initial b
+    uint256 public defaultStakePercent = 20; // 20% stake
     uint8 public defaultMaxMilestones = 5;
     uint256 public snapshotInterval = 3600; // 1 hour between TWAP snapshots
 
@@ -134,15 +122,16 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
     // ── Constructor ────────────────────────────────────────────────────
 
     constructor(
-        address _marketFactory,
-        address _collateralToken
+        address _marketFactory
     ) Ownable(msg.sender) {
         marketFactory = IPredictionMarketFactory(_marketFactory);
-        collateralToken = IERC20(_collateralToken);
 
         // Deploy oracle with this contract as the orchestrator
         oracle = new DecisionOracle(address(this));
     }
+
+    // ── Receive native token ──────────────────────────────────────────
+    receive() external payable {}
 
     // ═══════════════════════════════════════════════════════════════════
     // PROPOSAL CREATION
@@ -150,10 +139,6 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
 
     /**
      * @notice Create a futarchy proposal with two competing options.
-     *
-     * Example: "Should we fund a community park or a library?"
-     *   questionA = "Community satisfaction if we build the park"
-     *   questionB = "Community satisfaction if we build the library"
      *
      * @param _questionA          Question for conditional market A
      * @param _questionB          Question for conditional market B
@@ -189,18 +174,14 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
         proposalId = proposalCount++;
 
         // ── Deploy two BinaryMarkets via factory ──
-        // Both markets ask: "Will the metric be HIGH?" (YES) or "LOW?" (NO)
-        // The market with higher YES price = crowd believes that proposal produces better outcome
-
         string[2] memory outcomeNames = ["High", "Low"];
 
         (uint256 mIdA, address mktA) = marketFactory.createBinaryMarket(
             _questionA,
             outcomeNames,
-            _resolutionTime, // Markets technically resolve at metric time
+            _resolutionTime,
             defaultInitialB,
-            address(this), // This contract is the settlement resolver
-            address(collateralToken)
+            address(this) // This contract is the settlement resolver
         );
 
         (uint256 mIdB, address mktB) = marketFactory.createBinaryMarket(
@@ -208,8 +189,7 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
             outcomeNames,
             _resolutionTime,
             defaultInitialB,
-            address(this),
-            address(collateralToken)
+            address(this)
         );
 
         // ── Deploy two FutarchyEscrows ──
@@ -221,7 +201,6 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
         FutarchyEscrow escrowA = new FutarchyEscrow(
             _creatorA,
             address(this),
-            address(collateralToken),
             _fundingGoalA,
             stakeA,
             defaultMaxMilestones,
@@ -231,7 +210,6 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
         FutarchyEscrow escrowB = new FutarchyEscrow(
             _creatorB,
             address(this),
-            address(collateralToken),
             _fundingGoalB,
             stakeB,
             defaultMaxMilestones,
@@ -260,7 +238,6 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
         prop.settlementBps = defaultSettlementBps;
 
         // ── Register with oracle for TWAP tracking ──
-        // TWAP starts immediately and runs until decision deadline
         oracle.registerProposal(
             proposalId,
             mktA,
@@ -331,13 +308,9 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
             // settlementReserve stays in the market contract for eventual parimutuel payout
 
             if (escrowPortion > 0) {
-                // Pull funds from winner market to this contract, then route to escrow
-                // NOTE: The market contract needs to support this withdrawal.
-                // In production, this would be via a dedicated `withdrawForEscrow()` on the market.
-                // For now, we approve and deposit.
-                collateralToken.approve(winnerEscrow, escrowPortion);
-                FutarchyEscrow(winnerEscrow).depositFromPool(escrowPortion);
-                FutarchyEscrow(winnerEscrow).activateEscrow();
+                // Deposit native token to winner escrow
+                FutarchyEscrow(payable(winnerEscrow)).depositFromPool{value: escrowPortion}();
+                FutarchyEscrow(payable(winnerEscrow)).activateEscrow();
             }
 
             emit DecisionExecuted(
@@ -350,7 +323,7 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
         }
 
         // ── Step 3: Void loser's escrow ──
-        FutarchyEscrow(loserEscrow).voidAndRefund();
+        FutarchyEscrow(payable(loserEscrow)).voidAndRefund();
 
         emit LoserRefundsEnabled(_proposalId, loserMkt);
     }
@@ -361,7 +334,6 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
 
     /**
      * @notice Resolve the winning market after the actual metric is measured.
-     *         This triggers parimutuel settlement for the winning market's reserve.
      *
      * @param _proposalId      The proposal
      * @param _winningOutcome  0 = metric was HIGH (good), 1 = metric was LOW (bad)
@@ -403,7 +375,7 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
                 prop.phase == ProposalPhase.WINNER_RESOLVED,
             "Invalid phase"
         );
-        FutarchyEscrow(prop.winnerEscrow).validate(_approve, _reject);
+        FutarchyEscrow(payable(prop.winnerEscrow)).validate(_approve, _reject);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -411,8 +383,7 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Emergency cancellation — voids both escrows, both markets stay
-     *         unresolved (users keep their shares, can't trade)
+     * @notice Emergency cancellation — voids both escrows
      */
     function cancelProposal(uint256 _proposalId) external onlyOwner {
         Proposal storage prop = proposals[_proposalId];
@@ -424,8 +395,8 @@ contract FutarchyCrowdfund is Ownable, ReentrancyGuard {
         prop.phase = ProposalPhase.CANCELLED;
 
         // Void both escrows
-        FutarchyEscrow(prop.escrowA).voidAndRefund();
-        FutarchyEscrow(prop.escrowB).voidAndRefund();
+        FutarchyEscrow(payable(prop.escrowA)).voidAndRefund();
+        FutarchyEscrow(payable(prop.escrowB)).voidAndRefund();
 
         emit ProposalCancelled(_proposalId);
     }

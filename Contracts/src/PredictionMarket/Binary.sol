@@ -11,7 +11,6 @@ import "./FixedPointMath.sol";
  * @dev Uses Hybrid LMSR: pricing only, settlement is parimutuel.
  *      Collateral is native token (msg.value / payable).
  *
- * FIXES applied (v2):
  *  #1 - Replaced broken Taylor-series expApprox with FixedPointMath.expUint (shift+polynomial)
  *  #2 - Replaced integer Math.log2 with FixedPointMath.ln (proper fixed-point logarithm)
  *  #3 - Added pool solvency guard on sells + cost-basis tracking
@@ -34,6 +33,7 @@ contract BinaryMarket is ReentrancyGuard {
     string[2] public outcomeNames;
     uint256 public resolutionTime;
     address public immutable creator;
+    address public owner;
 
     // ── External contracts ─────────────────────────────────────────────
     address public settlementContract;
@@ -53,7 +53,7 @@ contract BinaryMarket is ReentrancyGuard {
     uint256 public totalYesShares;
     uint256 public totalNoShares;
 
-    // ── FIX #3: Cost-basis tracking for solvency on sells ──────────────
+    // ── Cost-basis tracking for solvency on sells ────────────────────
     // Tracks total native token a user has paid for shares of each outcome.
     // Sell refund is capped at min(lmsrRefund, userCostBasis) to prevent
     // pool drain when adaptive b shifts pricing between buy and sell.
@@ -64,7 +64,7 @@ contract BinaryMarket is ReentrancyGuard {
     bool public isResolved;
     uint256 public winningOutcome;
 
-    // ── FIX #4: Per-user claim tracking + snapshotted payout ───────────
+    //  Per-user claim tracking + snapshotted payout ───────────
     // payoutPerShare is computed once at resolution and frozen.
     // hasClaimed prevents double-claims without relying on a broken global flag.
     uint256 public payoutPerShareSnapshot; // 1e12 precision
@@ -125,7 +125,8 @@ contract BinaryMarket is ReentrancyGuard {
         uint256 _resolutionTime,
         uint256 _initialB,
         address _settlementContract,
-        address _creator
+        address _creator,
+        address _owner
     ) {
         marketId = _marketId;
         question = _question;
@@ -141,7 +142,7 @@ contract BinaryMarket is ReentrancyGuard {
     receive() external payable {}
 
     // ═══════════════════════════════════════════════════════════════════
-    // FIX #1 & #2: LMSR PRICING WITH PROPER FIXED-POINT MATH
+    // LMSR PRICING WITH PROPER FIXED-POINT MATH
     // ═══════════════════════════════════════════════════════════════════
 
     /**
@@ -164,14 +165,14 @@ contract BinaryMarket is ReentrancyGuard {
         uint256 term1 = (_qYes * PRECISION) / b;
         uint256 term2 = (_qNo * PRECISION) / b;
 
-        // FIX #1: Proper exp via shift+polynomial (replaces broken Taylor series)
+        // Proper exp via shift+polynomial (replaces broken Taylor series)
         uint256 exp1 = FixedPointMath.expUint(term1);
         uint256 exp2 = FixedPointMath.expUint(term2);
 
         uint256 sum = exp1 + exp2;
         require(sum > 0, "Cost overflow");
 
-        // FIX #2: Proper fixed-point ln (replaces integer Math.log2)
+        // Proper fixed-point ln (replaces integer Math.log2)
         // FixedPointMath.ln returns int256 in 1e18 scale
         int256 lnSum = FixedPointMath.ln(sum);
         require(lnSum >= 0, "Negative ln");
@@ -274,7 +275,9 @@ contract BinaryMarket is ReentrancyGuard {
 
         // Refund excess
         if (msg.value > cost) {
-            (bool refundOk, ) = payable(msg.sender).call{value: msg.value - cost}("");
+            (bool refundOk, ) = payable(msg.sender).call{
+                value: msg.value - cost
+            }("");
             require(refundOk, "Refund failed");
         }
 
@@ -283,13 +286,13 @@ contract BinaryMarket is ReentrancyGuard {
             qYes += _shareAmount;
             yesShares[msg.sender] += _shareAmount;
             totalYesShares += _shareAmount;
-            // FIX #3: Track cost basis
+            // Track cost basis
             yesCostBasis[msg.sender] += cost;
         } else {
             qNo += _shareAmount;
             noShares[msg.sender] += _shareAmount;
             totalNoShares += _shareAmount;
-            // FIX #3: Track cost basis
+            //  Track cost basis
             noCostBasis[msg.sender] += cost;
         }
 
@@ -308,7 +311,7 @@ contract BinaryMarket is ReentrancyGuard {
     /**
      * @notice Sell shares — LMSR pricing with solvency guard
      *
-     * FIX #3: Refund is capped to prevent pool drain.
+     *  Refund is capped to prevent pool drain.
      * When adaptive b grows between buy and sell, LMSR can compute a refund
      * larger than what the user originally paid. Without a cap, this drains
      * the pool and makes it insolvent for settlement.
@@ -339,7 +342,7 @@ contract BinaryMarket is ReentrancyGuard {
         // LMSR-computed refund
         uint256 lmsrRefund = getSellRefund(_outcome, _shareAmount);
 
-        // FIX #3: Cap refund to protect pool solvency
+        // Cap refund to protect pool solvency
         // Pro-rata cost basis for the shares being sold
         uint256 proRataCostBasis = (userCostBasis * _shareAmount) /
             userShareBalance;
@@ -391,13 +394,13 @@ contract BinaryMarket is ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // FIX #4: RESOLUTION & SETTLEMENT (per-user claims + snapshot)
+    // RESOLUTION & SETTLEMENT (per-user claims + snapshot)
     // ═══════════════════════════════════════════════════════════════════
 
     /**
      * @notice Called by SettlementLogic contract to resolve market
      *
-     * FIX #4: Snapshots payoutPerShare at resolution time.
+     *  Snapshots payoutPerShare at resolution time.
      * Previous code had `isSettled` (global flag) that was never set,
      * and totalShares weren't decremented, causing rounding drift.
      * Now: payout is frozen at resolution so all claimants get the same rate.
@@ -428,7 +431,7 @@ contract BinaryMarket is ReentrancyGuard {
     /**
      * @notice Claim winnings using snapshotted payout rate
      *
-     * FIX #4: Uses per-user `hasClaimed` mapping instead of broken global `isSettled`.
+     *  Uses per-user `hasClaimed` mapping instead of broken global `isSettled`.
      * Uses frozen `payoutPerShareSnapshot` so claim order doesn't matter
      * and rounding dust doesn't accumulate against late claimants.
      */
@@ -493,14 +496,20 @@ contract BinaryMarket is ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════
 
     function pause() external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(!paused, "Already paused");
         paused = true;
         emit MarketPaused(msg.sender);
     }
 
     function unpause() external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(paused, "Not paused");
         require(!isCancelled, "Market is cancelled");
         paused = false;
@@ -508,7 +517,10 @@ contract BinaryMarket is ReentrancyGuard {
     }
 
     function cancelMarket() external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(!isResolved, "Already resolved");
         require(!isCancelled, "Already cancelled");
         isCancelled = true;
@@ -550,14 +562,19 @@ contract BinaryMarket is ReentrancyGuard {
     }
 
     /// @notice IMarket-compatible: returns shares for a user by outcome index
-    function userShares(address _user, uint256 _outcome) external view returns (uint256) {
+    function userShares(
+        address _user,
+        uint256 _outcome
+    ) external view returns (uint256) {
         if (_outcome == OUTCOME_YES) return yesShares[_user];
         if (_outcome == OUTCOME_NO) return noShares[_user];
         return 0;
     }
 
     /// @notice IMarket-compatible: returns total shares for an outcome index
-    function totalSharesPerOutcome(uint256 _outcome) external view returns (uint256) {
+    function totalSharesPerOutcome(
+        uint256 _outcome
+    ) external view returns (uint256) {
         if (_outcome == OUTCOME_YES) return totalYesShares;
         if (_outcome == OUTCOME_NO) return totalNoShares;
         return 0;
@@ -565,7 +582,10 @@ contract BinaryMarket is ReentrancyGuard {
 
     /// @notice Authorize a PrizeDistributor to pull the settlement pool
     function setPrizeDistributor(address _distributor) external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(prizeDistributor == address(0), "Already set");
         prizeDistributor = _distributor;
     }
@@ -579,6 +599,11 @@ contract BinaryMarket is ReentrancyGuard {
         settlementPool = 0;
         (bool ok, ) = payable(prizeDistributor).call{value: amount}("");
         require(ok, "Transfer failed");
+    }
+
+    function setOwner(address _newOwner) external {
+        require(msg.sender == owner, "Only owner can call this function");
+        owner = _newOwner;
     }
 
     function getMarketInfo()

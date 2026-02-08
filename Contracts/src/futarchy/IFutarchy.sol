@@ -22,7 +22,7 @@ interface IFutarchyMarket {
         uint256 outcome,
         uint256 shareAmount,
         uint256 maxCost
-    ) external;
+    ) external payable;
 
     function swapOut(
         uint256 outcome,
@@ -87,7 +87,7 @@ interface IDecisionOracle {
  * @notice Interface for the milestone-based escrow (upgraded PredictionMarketCollab)
  */
 interface IFutarchyEscrow {
-    function depositFromPool(uint256 amount) external;
+    function depositFromPool() external payable;
 
     function activateEscrow() external;
 

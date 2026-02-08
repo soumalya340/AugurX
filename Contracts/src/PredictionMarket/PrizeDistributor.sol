@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -32,7 +31,7 @@ interface IMarket {
 /**
  * @title PrizeDistributor
  * @notice Parimutuel prize distribution: winners split pool proportionally
- * @dev Can be integrated into markets or used as standalone claim processor
+ * @dev Uses native token. Can be integrated into markets or used as standalone claim processor.
  */
 contract PrizeDistributor is ReentrancyGuard {
     using Math for uint256;
@@ -49,7 +48,6 @@ contract PrizeDistributor is ReentrancyGuard {
     }
 
     mapping(uint256 => Distribution) public distributions;
-    IERC20 public immutable collateralToken;
 
     event DistributionCreated(uint256 indexed marketId, uint256 payoutPerShare);
     event PrizeClaimed(
@@ -58,9 +56,8 @@ contract PrizeDistributor is ReentrancyGuard {
         uint256 amount
     );
 
-    constructor(address _collateralToken) {
-        collateralToken = IERC20(_collateralToken);
-    }
+    // ── Receive native token ──────────────────────────────────────────
+    receive() external payable {}
 
     /**
      * @notice Calculate and store distribution parameters after resolution
@@ -88,7 +85,7 @@ contract PrizeDistributor is ReentrancyGuard {
         require(totalWinningShares > 0, "No winning shares");
 
         // Calculate: payout = pool / winning_shares
-        // Use high precision (1e12) to avoid rounding errors with USDC (1e6)
+        // Use high precision (1e12) to avoid rounding errors
         payoutPerShare = (totalPool * 1e12) / totalWinningShares;
 
         Distribution storage dist = distributions[_marketId];
@@ -119,18 +116,16 @@ contract PrizeDistributor is ReentrancyGuard {
         require(!dist.hasClaimed[msg.sender], "Already claimed");
 
         IMarket market = IMarket(dist.marketContract);
-        uint256 userShares = market.userShares(msg.sender, dist.winningOutcome);
-        require(userShares > 0, "No winning shares");
+        uint256 userShareCount = market.userShares(msg.sender, dist.winningOutcome);
+        require(userShareCount > 0, "No winning shares");
 
         // Calculate: payout = (user_shares * payout_per_share) / 1e12
-        uint256 payout = (userShares * dist.payoutPerShare) / 1e12;
+        uint256 payout = (userShareCount * dist.payoutPerShare) / 1e12;
 
         dist.hasClaimed[msg.sender] = true;
 
-        require(
-            collateralToken.transfer(msg.sender, payout),
-            "Transfer failed"
-        );
+        (bool ok, ) = payable(msg.sender).call{value: payout}("");
+        require(ok, "Transfer failed");
 
         emit PrizeClaimed(_marketId, msg.sender, payout);
 
@@ -149,9 +144,9 @@ contract PrizeDistributor is ReentrancyGuard {
         if (dist.hasClaimed[_user]) return 0;
 
         IMarket market = IMarket(dist.marketContract);
-        uint256 userShares = market.userShares(_user, dist.winningOutcome);
+        uint256 userShareCount = market.userShares(_user, dist.winningOutcome);
 
-        return (userShares * dist.payoutPerShare) / 1e12;
+        return (userShareCount * dist.payoutPerShare) / 1e12;
     }
 
     /**

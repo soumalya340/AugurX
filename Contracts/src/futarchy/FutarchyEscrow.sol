@@ -1,28 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "../interfaces/IFutarchy.sol";
+import "./IFutarchy.sol";
 
 /**
  * @title FutarchyEscrow
  * @notice Milestone-based escrow for futarchy crowdfunding proposals.
- *         Upgraded from PredictionMarketCollabCollab to accept funds from prediction markets
- *         instead of flat-priced NFT mints.
+ *         Uses native token instead of ERC20.
  *
  * Lifecycle:
  *   PENDING → (orchestrator deposits from winning pool) → ACTIVE → milestone withdrawals → COMPLETED
  *   PENDING → (orchestrator triggers void) → VOIDED → refunds via cost basis
- *
- * Key changes from PredictionMarketCollabCollab:
- *   - Removed NFT minting (shares tracked in BinaryMarket)
- *   - Removed flat salePrice (pricing comes from LMSR)
- *   - Added depositFromPool() for orchestrator to route funds
- *   - Added voidAndRefund() for losing proposal cleanup
- *   - Kept milestone-based withdrawals with pause/validate flow
- *   - Kept creator staking mechanism
- *   - Added configurable fund split (escrow vs settlement reserve)
  */
 contract FutarchyEscrow is ReentrancyGuard {
     // ── Enums ──────────────────────────────────────────────────────────
@@ -42,24 +31,22 @@ contract FutarchyEscrow is ReentrancyGuard {
     address public orchestrator;
     address public linkedMarket; // The BinaryMarket this escrow is paired with
 
-    IERC20 public immutable collateralToken;
-
     // Fund tracking
     uint256 public fundsInReserve; // Total funds deposited from pool
-    uint256 public fundingGoal; // Target amount (informational, not enforced like PredictionMarketCollab)
+    uint256 public fundingGoal; // Target amount (informational)
     uint256 public totalDeposited; // Cumulative deposits
 
-    // Creator staking (from PredictionMarketCollab — skin in the game)
+    // Creator staking (skin in the game)
     bool public isCreatorStaked;
-    uint256 public stakeAmount; // Absolute amount (configurable, was 20% in PredictionMarketCollab)
+    uint256 public stakeAmount; // Absolute amount (configurable)
 
-    // Milestone tracking (from PredictionMarketCollab)
+    // Milestone tracking
     uint8 public numberOfMilestones;
     uint8 public maxMilestones;
     uint256 public maxWithdrawalPerMilestone;
     string[] public milestoneData; // IPFS hashes for milestone descriptions
 
-    // Pause mechanism (from PredictionMarketCollab — operator validates between milestones)
+    // Pause mechanism (operator validates between milestones)
     bool public paused;
 
     // ── Events ─────────────────────────────────────────────────────────
@@ -102,19 +89,9 @@ contract FutarchyEscrow is ReentrancyGuard {
 
     // ── Constructor ────────────────────────────────────────────────────
 
-    /**
-     * @param _proposalCreator    Address of the proposal creator
-     * @param _orchestrator       FutarchyCrowdfund orchestrator address
-     * @param _collateralToken    USDC or stablecoin address
-     * @param _fundingGoal        Target funding amount
-     * @param _stakeAmount        Required creator stake
-     * @param _maxMilestones      Maximum number of milestone withdrawals
-     * @param _maxWithdrawalPerMilestone  Cap per milestone (was 20% in PredictionMarketCollab)
-     */
     constructor(
         address _proposalCreator,
         address _orchestrator,
-        address _collateralToken,
         uint256 _fundingGoal,
         uint256 _stakeAmount,
         uint8 _maxMilestones,
@@ -122,7 +99,6 @@ contract FutarchyEscrow is ReentrancyGuard {
     ) {
         proposalCreator = _proposalCreator;
         orchestrator = _orchestrator;
-        collateralToken = IERC20(_collateralToken);
         fundingGoal = _fundingGoal;
         stakeAmount = _stakeAmount;
         maxMilestones = _maxMilestones;
@@ -131,26 +107,24 @@ contract FutarchyEscrow is ReentrancyGuard {
         paused = true;
     }
 
+    // ── Receive native token ──────────────────────────────────────────
+    receive() external payable {}
+
     // ═══════════════════════════════════════════════════════════════════
-    // CREATOR STAKING (preserved from PredictionMarketCollab)
+    // CREATOR STAKING
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Creator stakes funds as security deposit before proposal goes live.
-     *         In PredictionMarketCollab this was 20% of crowdFundingGoal.
-     *         Here the amount is configurable via constructor.
+     * @notice Creator stakes native token as security deposit before proposal goes live.
      */
-    function stake() external onlyProposalCreator inState(EscrowState.PENDING) {
+    function stake()
+        external
+        payable
+        onlyProposalCreator
+        inState(EscrowState.PENDING)
+    {
         require(!isCreatorStaked, "Already staked");
-
-        require(
-            collateralToken.transferFrom(
-                msg.sender,
-                address(this),
-                stakeAmount
-            ),
-            "Stake transfer failed"
-        );
+        require(msg.value == stakeAmount, "Wrong stake amount");
 
         isCreatorStaked = true;
         emit CreatorStaked(stakeAmount);
@@ -168,10 +142,8 @@ contract FutarchyEscrow is ReentrancyGuard {
 
         isCreatorStaked = false;
 
-        require(
-            collateralToken.transfer(proposalCreator, stakeAmount),
-            "Unstake transfer failed"
-        );
+        (bool ok, ) = payable(proposalCreator).call{value: stakeAmount}("");
+        require(ok, "Unstake transfer failed");
 
         emit CreatorUnstaked(stakeAmount);
     }
@@ -181,25 +153,20 @@ contract FutarchyEscrow is ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Orchestrator deposits funds from the winning market's settlement pool.
-     *         This is the escrow portion (e.g., 70-80% of pool).
-     *         The remaining portion stays in the market for parimutuel settlement.
-     * @param _amount USDC amount to deposit
+     * @notice Orchestrator deposits native token from the winning market's settlement pool.
      */
-    function depositFromPool(
-        uint256 _amount
-    ) external onlyOrchestrator inState(EscrowState.PENDING) {
-        require(_amount > 0, "Zero deposit");
+    function depositFromPool()
+        external
+        payable
+        onlyOrchestrator
+        inState(EscrowState.PENDING)
+    {
+        require(msg.value > 0, "Zero deposit");
 
-        require(
-            collateralToken.transferFrom(msg.sender, address(this), _amount),
-            "Deposit transfer failed"
-        );
+        fundsInReserve += msg.value;
+        totalDeposited += msg.value;
 
-        fundsInReserve += _amount;
-        totalDeposited += _amount;
-
-        emit FundsDeposited(_amount, fundsInReserve);
+        emit FundsDeposited(msg.value, fundsInReserve);
     }
 
     /**
@@ -221,7 +188,6 @@ contract FutarchyEscrow is ReentrancyGuard {
 
     /**
      * @notice Orchestrator voids escrow (losing proposal)
-     *         Refunds are handled at the orchestrator level via cost basis.
      */
     function voidAndRefund() external onlyOrchestrator {
         require(
@@ -232,31 +198,27 @@ contract FutarchyEscrow is ReentrancyGuard {
         state = EscrowState.VOIDED;
         paused = true;
 
-        // If creator staked, return their stake (they didn't lose — their proposal just wasn't chosen)
+        // If creator staked, return their stake
         if (isCreatorStaked) {
             isCreatorStaked = false;
-            require(
-                collateralToken.transfer(proposalCreator, stakeAmount),
-                "Stake refund failed"
-            );
+            (bool ok, ) = payable(proposalCreator).call{value: stakeAmount}("");
+            require(ok, "Stake refund failed");
             emit CreatorUnstaked(stakeAmount);
         }
 
-        // Any funds already deposited should be returned to orchestrator for redistribution
+        // Any funds already deposited should be returned to orchestrator
         if (fundsInReserve > 0) {
             uint256 remaining = fundsInReserve;
             fundsInReserve = 0;
-            require(
-                collateralToken.transfer(orchestrator, remaining),
-                "Fund return failed"
-            );
+            (bool ok, ) = payable(orchestrator).call{value: remaining}("");
+            require(ok, "Fund return failed");
         }
 
         emit EscrowVoided();
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // MILESTONE MANAGEMENT (preserved from PredictionMarketCollab)
+    // MILESTONE MANAGEMENT
     // ═══════════════════════════════════════════════════════════════════
 
     /**
@@ -271,7 +233,6 @@ contract FutarchyEscrow is ReentrancyGuard {
 
     /**
      * @notice Creator initiates first milestone funding (unpauses).
-     *         Mirrors PredictionMarketCollab's intiateProposalFunding().
      */
     function initiateFirstMilestone()
         external
@@ -285,8 +246,6 @@ contract FutarchyEscrow is ReentrancyGuard {
 
     /**
      * @notice Creator withdraws funds for current milestone.
-     *         Capped at maxWithdrawalPerMilestone (was 20% in PredictionMarketCollab).
-     *         Auto-pauses after each withdrawal — orchestrator/operator must validate to unpause.
      * @param _wallet Address to send funds to
      * @param _amount Amount to withdraw (must be <= cap)
      */
@@ -309,10 +268,8 @@ contract FutarchyEscrow is ReentrancyGuard {
         paused = true; // Pause until next validation
         numberOfMilestones++;
 
-        require(
-            collateralToken.transfer(_wallet, _amount),
-            "Withdrawal failed"
-        );
+        (bool ok, ) = payable(_wallet).call{value: _amount}("");
+        require(ok, "Withdrawal failed");
 
         // If all milestones done and no funds left, mark completed
         if (numberOfMilestones >= maxMilestones || fundsInReserve == 0) {
@@ -325,9 +282,8 @@ contract FutarchyEscrow is ReentrancyGuard {
 
     /**
      * @notice Orchestrator validates milestone (unpause/reject).
-     *         Mirrors PredictionMarketCollab's validate() but called by orchestrator instead of operator.
-     * @param _approve True = unpause for next milestone. False = keep paused or reject.
-     * @param _reject  If true and !_approve, void the escrow entirely (funds redistribute)
+     * @param _approve True = unpause for next milestone.
+     * @param _reject  If true and !_approve, void the escrow entirely
      */
     function validate(
         bool _approve,
@@ -342,34 +298,33 @@ contract FutarchyEscrow is ReentrancyGuard {
             }
         } else {
             if (_reject) {
-                // Full rejection — void escrow, enable refunds
+                // Full rejection — void escrow
                 state = EscrowState.VOIDED;
                 paused = true;
 
-                // Slash creator stake — distribute to backers via orchestrator
+                // Slash creator stake — send to orchestrator for redistribution
                 if (isCreatorStaked) {
                     uint256 slashedStake = stakeAmount;
                     isCreatorStaked = false;
-                    // Stake goes to orchestrator for redistribution to backers
-                    require(
-                        collateralToken.transfer(orchestrator, slashedStake),
-                        "Slash transfer failed"
-                    );
+                    (bool ok, ) = payable(orchestrator).call{
+                        value: slashedStake
+                    }("");
+                    require(ok, "Slash transfer failed");
                 }
 
                 // Return remaining reserve to orchestrator
                 if (fundsInReserve > 0) {
                     uint256 remaining = fundsInReserve;
                     fundsInReserve = 0;
-                    require(
-                        collateralToken.transfer(orchestrator, remaining),
-                        "Reserve return failed"
+                    (bool ok, ) = payable(orchestrator).call{value: remaining}(
+                        ""
                     );
+                    require(ok, "Reserve return failed");
                 }
 
                 emit EscrowVoided();
             }
-            // else: just keep paused (creator can submit more milestone info)
+            // else: just keep paused
         }
 
         emit Validated(_approve, _reject);

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./FixedPointMath.sol";
@@ -9,8 +8,8 @@ import "./FixedPointMath.sol";
 /**
  * @title CategoricalMarket
  * @notice LMSR-based AMM for categorical (multiple outcome) prediction markets
+ * @dev Collateral is native token (msg.value / payable).
  *
- * FIXES applied (v2):
  *  #1 - Replaced broken Taylor-series expApprox with FixedPointMath.expUint
  *  #2 - Replaced integer Math.log2 with FixedPointMath.ln
  *  #3 - Added pool solvency guard on sells + cost-basis tracking
@@ -31,6 +30,7 @@ contract CategoricalMarket is ReentrancyGuard {
     uint256 public immutable outcomeCount;
     uint256 public resolutionTime;
     address public immutable creator;
+    address public owner;
 
     // ── External contracts ─────────────────────────────────────────────
     address public settlementContract;
@@ -42,20 +42,19 @@ contract CategoricalMarket is ReentrancyGuard {
 
     // ── Settlement pool ────────────────────────────────────────────────
     uint256 public settlementPool;
-    IERC20 public immutable collateralToken;
 
     // ── Share tracking ─────────────────────────────────────────────────
     mapping(address => mapping(uint256 => uint256)) public userShares;
     uint256[] public totalSharesPerOutcome;
 
-    // ── FIX #3: Cost-basis tracking per user per outcome ───────────────
+    // ── Cost-basis tracking per user per outcome ────────────────────
     mapping(address => mapping(uint256 => uint256)) public costBasis;
 
     // ── Market state ───────────────────────────────────────────────────
     bool public isResolved;
     uint256 public winningOutcome;
 
-    // ── FIX #4: Per-user claims + snapshotted payout ───────────────────
+    // ── Per-user claims + snapshotted payout ──────────────────────────
     uint256 public payoutPerShareSnapshot; // 1e12 precision
     bool public payoutSnapshotted;
     mapping(address => bool) public hasClaimed;
@@ -70,8 +69,18 @@ contract CategoricalMarket is ReentrancyGuard {
     mapping(address => bool) public hasClaimedRefund;
 
     // ── Events ─────────────────────────────────────────────────────────
-    event SharesPurchased(address indexed buyer, uint256 outcome, uint256 shares, uint256 cost);
-    event SharesSold(address indexed seller, uint256 outcome, uint256 shares, uint256 refund);
+    event SharesPurchased(
+        address indexed buyer,
+        uint256 outcome,
+        uint256 shares,
+        uint256 cost
+    );
+    event SharesSold(
+        address indexed seller,
+        uint256 outcome,
+        uint256 shares,
+        uint256 refund
+    );
     event MarketResolved(uint256 winningOutcome, uint256 payoutPerShare);
     event WinningsClaimed(address indexed user, uint256 payout);
     event AdaptiveBUpdated(uint256 newB);
@@ -106,7 +115,7 @@ contract CategoricalMarket is ReentrancyGuard {
         uint256 _outcomeCount,
         address _settlementContract,
         address _creator,
-        address _quoteTokenAddr
+        address _owner
     ) {
         marketId = _marketId;
         question = _question;
@@ -120,12 +129,10 @@ contract CategoricalMarket is ReentrancyGuard {
 
         q = new uint256[](_outcomeCount);
         totalSharesPerOutcome = new uint256[](_outcomeCount);
-
-        collateralToken = IERC20(_quoteTokenAddr);
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // FIX #1 & #2: LMSR PRICING WITH PROPER FIXED-POINT MATH
+    //LMSR PRICING WITH PROPER FIXED-POINT MATH
     // ═══════════════════════════════════════════════════════════════════
 
     /**
@@ -136,13 +143,11 @@ contract CategoricalMarket is ReentrancyGuard {
 
         for (uint256 i = 0; i < outcomeCount; i++) {
             uint256 term = (_q[i] * PRECISION) / b;
-            // FIX #1: Proper exp via FixedPointMath
             sumExp += FixedPointMath.expUint(term);
         }
 
         require(sumExp > 0, "Cost overflow");
 
-        // FIX #2: Proper fixed-point ln
         int256 lnSum = FixedPointMath.ln(sumExp);
         require(lnSum >= 0, "Negative ln");
 
@@ -224,24 +229,27 @@ contract CategoricalMarket is ReentrancyGuard {
         uint256 _outcome,
         uint256 _shareAmount,
         uint256 _maxCost
-    ) external nonReentrant notResolved whenNotPaused {
+    ) external payable nonReentrant notResolved whenNotPaused {
         require(_outcome < outcomeCount, "Invalid outcome");
         require(_shareAmount > 0, "Amount must be > 0");
 
         uint256 cost = getBuyCost(_outcome, _shareAmount);
         require(cost <= _maxCost, "Slippage exceeded");
+        require(msg.value >= cost, "Insufficient payment");
 
-        require(
-            collateralToken.transferFrom(msg.sender, address(this), cost),
-            "Transfer failed"
-        );
+        // Refund excess
+        if (msg.value > cost) {
+            (bool refundOk, ) = payable(msg.sender).call{
+                value: msg.value - cost
+            }("");
+            require(refundOk, "Refund failed");
+        }
 
         q[_outcome] += _shareAmount;
         settlementPool += cost;
         userShares[msg.sender][_outcome] += _shareAmount;
         totalSharesPerOutcome[_outcome] += _shareAmount;
 
-        // FIX #3: Track cost basis
         costBasis[msg.sender][_outcome] += cost;
         totalCostBasis += cost;
 
@@ -253,7 +261,7 @@ contract CategoricalMarket is ReentrancyGuard {
     /**
      * @notice Sell shares — LMSR pricing with solvency guard
      *
-     * FIX #3: Refund capped at min(lmsrRefund, proRataCostBasis, settlementPool)
+     *  Refund capped at min(lmsrRefund, proRataCostBasis, settlementPool)
      */
     function swapOut(
         uint256 _outcome,
@@ -269,9 +277,10 @@ contract CategoricalMarket is ReentrancyGuard {
         // LMSR-computed refund
         uint256 lmsrRefund = getSellRefund(_outcome, _shareAmount);
 
-        // FIX #3: Cap refund for solvency
+        // Cap refund for solvency
         uint256 userCostBasis = costBasis[msg.sender][_outcome];
-        uint256 proRataCostBasis = (userCostBasis * _shareAmount) / userShareBalance;
+        uint256 proRataCostBasis = (userCostBasis * _shareAmount) /
+            userShareBalance;
         uint256 refund = Math.min(lmsrRefund, proRataCostBasis);
         refund = Math.min(refund, settlementPool);
 
@@ -285,10 +294,8 @@ contract CategoricalMarket is ReentrancyGuard {
         totalCostBasis -= proRataCostBasis;
         settlementPool -= refund;
 
-        require(
-            collateralToken.transfer(msg.sender, refund),
-            "Transfer failed"
-        );
+        (bool ok, ) = payable(msg.sender).call{value: refund}("");
+        require(ok, "Transfer failed");
 
         _updateAdaptiveB();
 
@@ -305,7 +312,7 @@ contract CategoricalMarket is ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // FIX #4: RESOLUTION & SETTLEMENT
+    //RESOLUTION & SETTLEMENT
     // ═══════════════════════════════════════════════════════════════════
 
     /**
@@ -351,10 +358,8 @@ contract CategoricalMarket is ReentrancyGuard {
 
         hasClaimed[msg.sender] = true;
 
-        require(
-            collateralToken.transfer(msg.sender, payout),
-            "Transfer failed"
-        );
+        (bool ok, ) = payable(msg.sender).call{value: payout}("");
+        require(ok, "Transfer failed");
 
         emit WinningsClaimed(msg.sender, payout);
         return payout;
@@ -371,7 +376,6 @@ contract CategoricalMarket is ReentrancyGuard {
 
     function getPayoutPerShare() external view returns (uint256) {
         require(isResolved && payoutSnapshotted, "Not resolved");
-        // Return in collateral token units, consistent with claimWinnings math
         return payoutPerShareSnapshot / 1e12;
     }
 
@@ -380,14 +384,20 @@ contract CategoricalMarket is ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════
 
     function pause() external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(!paused, "Already paused");
         paused = true;
         emit MarketPaused(msg.sender);
     }
 
     function unpause() external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(paused, "Not paused");
         require(!isCancelled, "Market is cancelled");
         paused = false;
@@ -395,7 +405,10 @@ contract CategoricalMarket is ReentrancyGuard {
     }
 
     function cancelMarket() external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(!isResolved, "Already resolved");
         require(!isCancelled, "Already cancelled");
         isCancelled = true;
@@ -422,7 +435,8 @@ contract CategoricalMarket is ReentrancyGuard {
         totalCostBasis -= userBasis;
         settlementPool -= refund;
 
-        require(collateralToken.transfer(msg.sender, refund), "Transfer failed");
+        (bool ok, ) = payable(msg.sender).call{value: refund}("");
+        require(ok, "Transfer failed");
 
         emit RefundClaimed(msg.sender, refund);
         return refund;
@@ -434,7 +448,10 @@ contract CategoricalMarket is ReentrancyGuard {
 
     /// @notice Authorize a PrizeDistributor to pull the settlement pool
     function setPrizeDistributor(address _distributor) external {
-        require(msg.sender == creator || msg.sender == settlementContract, "Unauthorized");
+        require(
+            msg.sender == creator || msg.sender == settlementContract,
+            "Unauthorized"
+        );
         require(prizeDistributor == address(0), "Already set");
         prizeDistributor = _distributor;
     }
@@ -446,6 +463,12 @@ contract CategoricalMarket is ReentrancyGuard {
         uint256 amount = settlementPool;
         require(amount > 0, "No funds");
         settlementPool = 0;
-        require(collateralToken.transfer(prizeDistributor, amount), "Transfer failed");
+        (bool ok, ) = payable(prizeDistributor).call{value: amount}("");
+        require(ok, "Transfer failed");
+    }
+
+    function setOwner(address _newOwner) external {
+        require(msg.sender == owner, "Only owner can call this function");
+        owner = _newOwner;
     }
 }

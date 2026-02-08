@@ -18,12 +18,23 @@ source .env && forge script script/DeployCrowdfund.s.sol:DeployCrowdfund \
   --chain-id 5042002
 ```
 
+### DeployPredictionMarket.s.sol
+
+Deploys **PredictionMarketFactory** to Arc Testnet.
+
+**Deployed (Arc Testnet, chain 5042002):** `0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2`
+
+```bash
+source .env && forge script script/DeployPredictionMarket.s.sol:DeployPredictionMarket \
+  --rpc-url arc_testnet --broadcast --private-key $PRIVATE_KEY --chain-id 5042002
+```
+
 ### DeployFutarchy.s.sol
 
 Deploys **FutarchyCrowdfund** (and **DecisionOracle**). Requires `MARKET_FACTORY` and `COLLATERAL_TOKEN` (USDC) in `.env`. Deploy the prediction market stack first, then set `MARKET_FACTORY` to the logged factory address.
 
 ```bash
-export MARKET_FACTORY=0x...   # PredictionMarketFactory address from DeployPredictionMarket
+export MARKET_FACTORY=0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2   # PredictionMarketFactory (Arc Testnet)
 export COLLATERAL_TOKEN=0x... # USDC on Arc Testnet
 source .env && forge script script/DeployFutarchy.s.sol:DeployFutarchy \
   --rpc-url arc_testnet \
