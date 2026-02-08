@@ -1,12 +1,27 @@
-### Testing the health endpoint
+### Health check
 GET http://localhost:3000/health
 
-### Testing the transfer endpoint
-POST http://localhost:3000/transfer
+###
+
+### Prepare transfer — get unsigned burn intent for user to sign
+POST http://localhost:3000/prepare-transfer
 Content-Type: application/json
 
 {
-    "isEvmToArc": false,
-    "chainToTransfer": "baseSepolia",
-    "amount": 1
+  "userAddress": "0x48eE6eda30eAbA8D1308bb6A8371C4DF519F69C4",
+  "isEvmToArc": true,
+  "chainToTransfer": "baseSepolia",
+  "amount": 1
+}
+
+###
+
+### Execute transfer — submit signed burn intent (use response from prepare-transfer)
+POST http://localhost:3000/execute-transfer
+Content-Type: application/json
+
+{
+  "signature": "0x...",
+  "typedData": {},
+  "transferDetails": {}
 }
