@@ -12,7 +12,9 @@
     "balance2": "tsx balance2.ts",
     "vault-balances": "tsx vault_balances.ts",
     "wallet-balance": "tsx wallet_balance.ts",
-    "crowdfund": "node call_contracts/crowdfund_interact.js"
+    "crowdfund": "node call_contracts/crowdfund_interact.js",
+    "transfer_api_arc_to_evm": "node transferArcToEvm_api_call.js",
+    "transfer_api_evm_to_arc": "node transferEvmToArc_api_call.js"
   },
   "dependencies": {
     "dotenv": "^17.2.4",

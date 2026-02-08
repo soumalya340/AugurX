@@ -3,11 +3,37 @@
 import "dotenv/config";
 import express from "express";
 import { ethers } from "ethers";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { chainConfigs } from "./utilities/utils/config.ts";
 import {
   prepareBurnIntent,
   executeWithSignature,
 } from "./utilities/transfer/unified_signed_transfer.ts";
+
+// --- PredictionMarketFactory setup ---
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PM_CONTRACT_ADDRESS = "0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2";
+const ARC_TESTNET_RPC = "https://rpc.testnet.arc.network";
+const ARC_CHAIN_ID = 5042002;
+
+function loadPredictionMarketAbi() {
+  const path = join(__dirname, "utilities", "call_contracts", "PredictionMarketFactory.json");
+  const artifact = JSON.parse(readFileSync(path, "utf8"));
+  return artifact.abi ?? artifact;
+}
+
+const pmProvider = new ethers.JsonRpcProvider(ARC_TESTNET_RPC, ARC_CHAIN_ID);
+const pmKey = process.env.EVM_PRIVATE_KEY;
+if (!pmKey) console.warn("EVM_PRIVATE_KEY not set — prediction market write endpoints will fail");
+const pmSigner = pmKey ? new ethers.Wallet(pmKey.trim(), pmProvider) : null;
+const pmAbi = loadPredictionMarketAbi();
+const pmContract = new ethers.Contract(
+  PM_CONTRACT_ADDRESS,
+  pmAbi,
+  pmSigner ?? pmProvider
+);
 
 const VALID_CHAINS = Object.keys(chainConfigs).filter(
   (c) => c !== "arcTestnet"
@@ -113,6 +139,168 @@ app.post("/execute-transfer", async (req, res) => {
   }
 });
 
+// --- Prediction Market READ endpoints ---
+
+app.get("/prediction-market/market-count", async (_req, res) => {
+  try {
+    const count = await pmContract.marketCount();
+    res.json({ marketCount: count.toString() });
+  } catch (err) {
+    console.error("marketCount failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to get market count" });
+  }
+});
+
+app.get("/prediction-market/creation-fee", async (_req, res) => {
+  try {
+    const fee = await pmContract.creationFee();
+    res.json({ feeWei: fee.toString(), feeEther: ethers.formatEther(fee) });
+  } catch (err) {
+    console.error("creationFee failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to get creation fee" });
+  }
+});
+
+app.get("/prediction-market/min-seed-amount", async (_req, res) => {
+  try {
+    const min = await pmContract.minSeedAmount();
+    res.json({ minSeedAmountWei: min.toString(), minSeedAmountEther: ethers.formatEther(min) });
+  } catch (err) {
+    console.error("minSeedAmount failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to get min seed amount" });
+  }
+});
+
+app.get("/prediction-market/owner", async (_req, res) => {
+  try {
+    const owner = await pmContract.owner();
+    res.json({ owner });
+  } catch (err) {
+    console.error("owner failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to get owner" });
+  }
+});
+
+app.get("/prediction-market/permissionless-creation", async (_req, res) => {
+  try {
+    const allowed = await pmContract.permissionlessCreation();
+    res.json({ permissionlessCreation: allowed });
+  } catch (err) {
+    console.error("permissionlessCreation failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to get permissionless creation status" });
+  }
+});
+
+app.get("/prediction-market/authorized-creators/:address", async (req, res) => {
+  const { address } = req.params;
+  if (!ethers.isAddress(address)) {
+    return res.status(400).json({ error: "Invalid Ethereum address" });
+  }
+  try {
+    const authorized = await pmContract.authorizedCreators(address);
+    res.json({ address, authorized });
+  } catch (err) {
+    console.error("authorizedCreators failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to check authorized creator" });
+  }
+});
+
+app.get("/prediction-market/markets/:marketId", async (req, res) => {
+  const { marketId } = req.params;
+  try {
+    const info = await pmContract.markets(marketId);
+    res.json({
+      marketId,
+      marketAddress: info.marketAddress,
+      marketType: info.marketType.toString(),
+      status: info.status.toString(),
+      creator: info.creator,
+      question: info.question,
+      resolutionTime: info.resolutionTime.toString(),
+      settlementContract: info.settlementContract,
+    });
+  } catch (err) {
+    console.error("markets failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to get market info" });
+  }
+});
+
+// --- Prediction Market WRITE endpoint ---
+
+/**
+ * POST /prediction-market/create-binary-market
+ *
+ * Body: {
+ *   "question": "Will ETH hit $5000 by Dec 2025?",
+ *   "outcomeYes": "Yes",
+ *   "outcomeNo": "No",
+ *   "resolutionTimeUnix": 1735689600,
+ *   "initialB": "1000000000000000000",
+ *   "settlementAddress": "0x0000000000000000000000000000000000000000"
+ * }
+ */
+app.post("/prediction-market/create-binary-market", async (req, res) => {
+  if (!pmSigner) {
+    return res.status(503).json({ error: "EVM_PRIVATE_KEY not configured" });
+  }
+
+  const { question, outcomeYes, outcomeNo, resolutionTimeUnix, initialB, settlementAddress } = req.body;
+
+  if (!question) {
+    return res.status(400).json({ error: "question is required" });
+  }
+
+  const yesLabel = outcomeYes || "Yes";
+  const noLabel = outcomeNo || "No";
+  const settlement = settlementAddress || ethers.ZeroAddress;
+  const initialBWei = BigInt(initialB || "1000000000000000000");
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const oneYearFromNow = nowSec + 86400 * 365;
+  let resolutionTime = resolutionTimeUnix ? BigInt(resolutionTimeUnix) : BigInt(oneYearFromNow);
+
+  if (Number(resolutionTime) <= nowSec) {
+    resolutionTime = BigInt(oneYearFromNow);
+  }
+
+  try {
+    const requiredFeeWei = await pmContract.creationFee();
+    let valueWei = ethers.parseEther("1");
+    if (valueWei < requiredFeeWei) {
+      valueWei = requiredFeeWei;
+    }
+
+    const tx = await pmContract.createBinaryMarket(
+      question,
+      [yesLabel, noLabel],
+      resolutionTime,
+      initialBWei,
+      settlement,
+      { value: valueWei }
+    );
+    console.log("CreateBinaryMarket tx:", tx.hash);
+    const receipt = await tx.wait();
+
+    const result = { txHash: tx.hash, blockNumber: receipt.blockNumber };
+
+    const iface = pmContract.interface;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+        if (parsed && parsed.name === "MarketCreated") {
+          result.marketId = parsed.args.marketId.toString();
+          result.marketAddress = parsed.args.marketAddress;
+        }
+      } catch (_) {}
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error("createBinaryMarket failed:", err);
+    res.status(500).json({ error: err?.message || "Failed to create binary market" });
+  }
+});
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
@@ -122,4 +310,12 @@ app.listen(PORT, () => {
   console.log("Endpoints:");
   console.log("  POST /prepare-transfer");
   console.log("  POST /execute-transfer");
+  console.log("  GET  /prediction-market/market-count");
+  console.log("  GET  /prediction-market/creation-fee");
+  console.log("  GET  /prediction-market/min-seed-amount");
+  console.log("  GET  /prediction-market/owner");
+  console.log("  GET  /prediction-market/permissionless-creation");
+  console.log("  GET  /prediction-market/authorized-creators/:address");
+  console.log("  GET  /prediction-market/markets/:marketId");
+  console.log("  POST /prediction-market/create-binary-market");
 });
