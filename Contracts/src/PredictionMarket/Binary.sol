@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./FixedPointMath.sol";
@@ -9,7 +8,8 @@ import "./FixedPointMath.sol";
 /**
  * @title BinaryMarket
  * @notice LMSR-based AMM for binary (Yes/No) prediction markets
- * @dev Uses Hybrid LMSR: pricing only, settlement is parimutuel
+ * @dev Uses Hybrid LMSR: pricing only, settlement is parimutuel.
+ *      Collateral is native token (msg.value / payable).
  *
  * FIXES applied (v2):
  *  #1 - Replaced broken Taylor-series expApprox with FixedPointMath.expUint (shift+polynomial)
@@ -44,10 +44,6 @@ contract BinaryMarket is ReentrancyGuard {
     uint256 public qYes;
     uint256 public qNo;
 
-    // ── Collateral ─────────────────────────────────────────────────────
-    IERC20 public immutable collateralToken;
-    uint256 public constant DECIMALS = 6; // USDC
-
     // ── Settlement pool (parimutuel) ───────────────────────────────────
     uint256 public settlementPool;
 
@@ -58,7 +54,7 @@ contract BinaryMarket is ReentrancyGuard {
     uint256 public totalNoShares;
 
     // ── FIX #3: Cost-basis tracking for solvency on sells ──────────────
-    // Tracks total USDC a user has paid for shares of each outcome.
+    // Tracks total native token a user has paid for shares of each outcome.
     // Sell refund is capped at min(lmsrRefund, userCostBasis) to prevent
     // pool drain when adaptive b shifts pricing between buy and sell.
     mapping(address => uint256) public yesCostBasis;
@@ -129,8 +125,7 @@ contract BinaryMarket is ReentrancyGuard {
         uint256 _resolutionTime,
         uint256 _initialB,
         address _settlementContract,
-        address _creator,
-        address _quoteTokenAddr
+        address _creator
     ) {
         marketId = _marketId;
         question = _question;
@@ -140,8 +135,10 @@ contract BinaryMarket is ReentrancyGuard {
         b = _initialB;
         settlementContract = _settlementContract;
         creator = _creator;
-        collateralToken = IERC20(_quoteTokenAddr);
     }
+
+    // ── Receive native token ──────────────────────────────────────────
+    receive() external payable {}
 
     // ═══════════════════════════════════════════════════════════════════
     // FIX #1 & #2: LMSR PRICING WITH PROPER FIXED-POINT MATH
@@ -266,18 +263,20 @@ contract BinaryMarket is ReentrancyGuard {
         uint256 _outcome,
         uint256 _shareAmount,
         uint256 _maxCost
-    ) external nonReentrant notResolved whenNotPaused {
+    ) external payable nonReentrant notResolved whenNotPaused {
         require(_outcome < OUTCOME_COUNT, "Invalid outcome");
         require(_shareAmount > 0, "Amount must be > 0");
 
         uint256 cost = getBuyCost(_outcome, _shareAmount);
         require(cost <= _maxCost, "Slippage exceeded");
         require(cost > 0, "Cost too low");
+        require(msg.value >= cost, "Insufficient payment");
 
-        require(
-            collateralToken.transferFrom(msg.sender, address(this), cost),
-            "Transfer failed"
-        );
+        // Refund excess
+        if (msg.value > cost) {
+            (bool refundOk, ) = payable(msg.sender).call{value: msg.value - cost}("");
+            require(refundOk, "Refund failed");
+        }
 
         // Update LMSR quantities
         if (_outcome == OUTCOME_YES) {
@@ -366,10 +365,8 @@ contract BinaryMarket is ReentrancyGuard {
         totalCostBasis -= proRataCostBasis;
         settlementPool -= refund;
 
-        require(
-            collateralToken.transfer(msg.sender, refund),
-            "Transfer failed"
-        );
+        (bool ok, ) = payable(msg.sender).call{value: refund}("");
+        require(ok, "Transfer failed");
 
         _updateAdaptiveB();
 
@@ -414,7 +411,7 @@ contract BinaryMarket is ReentrancyGuard {
         winningOutcome = _winningOutcome;
         isResolved = true;
 
-        // Snapshot payout per share (1e12 precision for USDC compatibility)
+        // Snapshot payout per share (1e12 precision)
         uint256 winningShares = (_winningOutcome == OUTCOME_YES)
             ? totalYesShares
             : totalNoShares;
@@ -422,7 +419,6 @@ contract BinaryMarket is ReentrancyGuard {
         if (winningShares > 0) {
             payoutPerShareSnapshot = (settlementPool * 1e12) / winningShares;
         }
-        // else: no winners, pool stays in contract (can add admin sweep later)
 
         payoutSnapshotted = true;
 
@@ -462,10 +458,8 @@ contract BinaryMarket is ReentrancyGuard {
 
         hasClaimed[msg.sender] = true;
 
-        require(
-            collateralToken.transfer(msg.sender, payout),
-            "Transfer failed"
-        );
+        (bool ok, ) = payable(msg.sender).call{value: payout}("");
+        require(ok, "Transfer failed");
 
         emit WinningsClaimed(msg.sender, payout);
         return payout;
@@ -476,7 +470,6 @@ contract BinaryMarket is ReentrancyGuard {
      */
     function getPayoutPerShare() external view returns (uint256) {
         require(isResolved && payoutSnapshotted, "Not resolved");
-        // Return in collateral token units (USDC), consistent with claimWinnings math
         return payoutPerShareSnapshot / 1e12;
     }
 
@@ -541,7 +534,8 @@ contract BinaryMarket is ReentrancyGuard {
         totalCostBasis -= userBasis;
         settlementPool -= refund;
 
-        require(collateralToken.transfer(msg.sender, refund), "Transfer failed");
+        (bool ok, ) = payable(msg.sender).call{value: refund}("");
+        require(ok, "Transfer failed");
 
         emit RefundClaimed(msg.sender, refund);
         return refund;
@@ -583,7 +577,8 @@ contract BinaryMarket is ReentrancyGuard {
         uint256 amount = settlementPool;
         require(amount > 0, "No funds");
         settlementPool = 0;
-        require(collateralToken.transfer(prizeDistributor, amount), "Transfer failed");
+        (bool ok, ) = payable(prizeDistributor).call{value: amount}("");
+        require(ok, "Transfer failed");
     }
 
     function getMarketInfo()

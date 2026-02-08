@@ -1,0 +1,12 @@
+### Testing the health endpoint
+GET http://localhost:3000/health
+
+### Testing the transfer endpoint
+POST http://localhost:3000/transfer
+Content-Type: application/json
+
+{
+    "isEvmToArc": false,
+    "chainToTransfer": "baseSepolia",
+    "amount": 1
+}
