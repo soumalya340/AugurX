@@ -96,3 +96,25 @@ yarn wallet-balance arcTestnet
 ```
 
 Valid chain names: same as in **Deposit** above.
+
+## Calling Crowdfund Contract
+
+Interact with the Crowdfund contract on Arc Testnet.
+
+```bash
+# Get contract total balance
+yarn crowdfund getBalance
+
+# Get balance for an address (defaults to your account)
+yarn crowdfund balances
+yarn crowdfund balances 0x1234...
+
+# Deposit USDC (default 0.01)
+yarn crowdfund deposit
+yarn crowdfund deposit 0.1
+
+# Withdraw your balance
+yarn crowdfund withdraw
+```
+
+Requires `EVM_PRIVATE_KEY` in `.env`.

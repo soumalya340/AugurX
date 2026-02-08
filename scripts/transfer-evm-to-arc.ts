@@ -24,10 +24,13 @@ import {
   GATEWAY_WALLET_ADDRESS,
   GATEWAY_MINTER_ADDRESS,
   type ChainKey,
-} from "./config.js";
-import { depositToGateway } from "./deposit.js";
-import { getVaultBalances, waitForGatewayBalance } from "./vault_balances.js";
-import { logWalletBalances } from "./wallet_balance.js";
+} from "./utils/config.js";
+import { depositToGateway } from "./utils/deposit.js";
+import {
+  getVaultBalances,
+  waitForGatewayBalance,
+} from "./utils/vault_balances.js";
+import { logWalletBalances } from "./utils/wallet_balance.js";
 
 const DESTINATION_CHAIN: ChainKey = "arcTestnet";
 

@@ -94,56 +94,38 @@ export type WaitForGatewayBalanceOptions = {
 };
 
 /**
- * Poll Gateway API until the given chain's balance is at least requiredMin.
- * Use after depositing so the transfer can proceed once the API has indexed the deposit.
+ * Poll Gateway balances until the given chain has at least requiredBalance USDC.
+ * @throws Error if timeout is reached before balance is sufficient.
  */
 export async function waitForGatewayBalance(
-  chainName: ChainKey,
-  requiredMin: number,
+  chain: ChainKey,
+  requiredBalance: number,
   options: WaitForGatewayBalanceOptions = {}
 ): Promise<void> {
   const { pollIntervalMs = 30_000, timeoutMs = 25 * 60 * 1000 } = options;
-  const domainId = chainConfigs[chainName].domainId;
-  const body = {
-    token: "USDC",
-    sources: [{ domain: domainId, depositor: account }],
-  };
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const res = await fetch(GATEWAY_BALANCES_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+
+  while (true) {
+    const entries = await getVaultBalances({
+      chains: [chain],
+      silent: true,
     });
-    const result = await res.json();
-    if (!res.ok)
-      throw new Error(`Gateway API ${res.status}: ${JSON.stringify(result)}`);
-    const b = result.balances?.find(
-      (x: { domain: number }) => x.domain === domainId
-    );
-    const available = b ? parseFloat(b.balance ?? "0") : 0;
-    if (available >= requiredMin) {
-      console.log(
-        `  Gateway balance on ${chainName} is now ${available.toFixed(
+    const entry = entries.find((e) => e.chain === chain);
+    const balance = entry?.balance ?? 0;
+
+    if (balance >= requiredBalance) return;
+
+    const elapsed = Date.now() - start;
+    if (elapsed >= timeoutMs) {
+      throw new Error(
+        `Timeout waiting for Gateway balance: need ${requiredBalance} USDC on ${chain}, have ${balance.toFixed(
           6
-        )} USDC. Proceeding with transfer.\n`
+        )} after ${Math.round(elapsed / 1000)}s`
       );
-      return;
     }
-    console.log(
-      `  Waiting for Gateway to credit deposit (need ${requiredMin.toFixed(
-        2
-      )} USDC, have ${available.toFixed(6)}) — polling again in ${
-        pollIntervalMs / 1000
-      }s...`
-    );
+
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
-  throw new Error(
-    `Timeout: Gateway balance on ${chainName} did not reach ${requiredMin} USDC within ${
-      timeoutMs / 60000
-    } minutes. Check block confirmations for the chain.`
-  );
 }
 
 /** Run when file is executed directly (e.g. npm run vault-balances). */

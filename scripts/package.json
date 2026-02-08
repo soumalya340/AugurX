@@ -11,7 +11,7 @@
     "balance2": "tsx balance2.ts",
     "vault-balances": "tsx vault_balances.ts",
     "wallet-balance": "tsx wallet_balance.ts",
-    "crowdfund": "node crowdfund_interact.js"
+    "crowdfund": "node call_contracts/crowdfund_interact.js"
   },
   "dependencies": {
     "dotenv": "^17.2.4",
