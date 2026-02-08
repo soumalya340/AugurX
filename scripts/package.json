@@ -5,8 +5,9 @@
   "license": "MIT",
   "scripts": {
     "deposit": "tsx deposit.ts",
-    "transfer-arc-to-evm": "tsx transfer-arc-to-evm.ts",
-    "transfer-evm-to-arc": "tsx transfer-evm-to-arc.ts",
+    "gateway": "tsx gateway.ts",
+    "transfer-arc-to-evm": "tsx transfer/transfer-arc-to-evm.ts",
+    "transfer-evm-to-arc": "tsx transfer/transfer-evm-to-arc.ts",
     "balances": "tsx balances.ts",
     "balance2": "tsx balance2.ts",
     "vault-balances": "tsx vault_balances.ts",

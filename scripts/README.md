@@ -47,6 +47,20 @@ yarn deposit all
 
 ---
 
+### Unified Gateway (EVM ↔ Arc)
+
+Run either transfer direction from a single entry point:
+
+```bash
+# EVM → Arc
+npm run gateway -- evm-to-arc baseSepolia 1
+
+# Arc → EVM (source Arc is fixed; specify destination only)
+npm run gateway -- arc-to-evm baseSepolia 1
+```
+
+---
+
 ### Transfer: EVM → Arc Testnet
 
 Move USDC from an EVM chain to Arc Testnet. If your Gateway balance on the source chain is too low, the script will attempt to deposit first, then poll until the Gateway API credits the balance before continuing.
@@ -62,16 +76,16 @@ yarn transfer-evm-to-arc baseSepolia 2
 
 ---
 
-### Transfer: Arc Testnet (or any source) → EVM
+### Transfer: Arc Testnet → EVM
 
-Move USDC from a source chain (e.g. Arc Testnet) to a destination EVM chain.
+Move USDC from Arc Testnet to a destination EVM chain. Source is fixed as Arc; only specify destination.
 
 ```bash
 # Transfer 1 USDC (default) from Arc Testnet to Base Sepolia
-yarn transfer-arc-to-evm arcTestnet baseSepolia
+yarn transfer-arc-to-evm baseSepolia
 
 # Transfer a specific amount (USDC)
-yarn transfer-arc-to-evm arcTestnet baseSepolia 2.5
+yarn transfer-arc-to-evm baseSepolia 2.5
 ```
 
 ---

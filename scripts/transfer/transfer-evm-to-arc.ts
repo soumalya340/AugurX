@@ -1,16 +1,11 @@
 /**
- * Transfer USDC: source chain → destination chain (via Circle Gateway).
+ * Transfer USDC: EVM chain → Arc Testnet (via Circle Gateway).
+ * Destination is always arcTestnet; you pass source chain, amount, and optionally final recipient.
  *
- * Usage: npm run transfer-arc-to-evm -- <sourceChain> <destinationChain> [amountUSDC]
- * Example: npm run transfer-arc-to-evm -- arcTestnet baseSepolia 1
- * Example: npm run transfer-arc-to-evm -- arcTestnet baseSepolia 2.5
- * (amount defaults to 1 USDC if omitted)
- *
- * Flow:
- * 1. Check unified Gateway balance on source (user must have deposited first).
- * 2. Create and sign burn intent (burn on source).
- * 3. Submit to Gateway API → get attestation + operator signature.
- * 4. Call gatewayMint on destination with attestation → USDC minted to your wallet.
+ * Usage: npm run transfer-evm-to-arc -- <sourceChain> [amountUSDC] [destinationAddress]
+ * Example: npm run transfer-evm-to-arc -- baseSepolia 1
+ * Example: npm run transfer-evm-to-arc -- baseSepolia 0.5 0xRecipient...
+ * (amount defaults to 1 USDC; destination defaults to your account)
  */
 
 import dotenv from "dotenv";
@@ -25,13 +20,15 @@ import {
   GATEWAY_WALLET_ADDRESS,
   GATEWAY_MINTER_ADDRESS,
   type ChainKey,
-} from "./utils/config.js";
-import { depositToGateway } from "./utils/deposit.js";
+} from "../utils/config.js";
+import { depositToGateway } from "../utils/deposit.js";
 import {
   getVaultBalances,
   waitForGatewayBalance,
-} from "./utils/vault_balances.js";
-import { logWalletBalances } from "./utils/wallet_balance.js";
+} from "../utils/vault_balances.js";
+import { logWalletBalances } from "../utils/wallet_balance.js";
+
+const DESTINATION_CHAIN: ChainKey = "arcTestnet";
 
 const validChains = Object.keys(chainConfigs) as ChainKey[];
 
@@ -39,23 +36,25 @@ const USDC_DECIMALS = 6;
 
 function parseCli(): {
   source: ChainKey;
-  destination: ChainKey;
   transferValue: bigint;
+  destinationAddress: string;
 } {
   const args = process.argv.slice(2);
-  if (args.length < 2) {
+  if (args.length < 1) {
     console.error(
-      "Usage: npm run transfer-arc-to-evm -- <sourceChain> <destinationChain> [amountUSDC]"
+      "Usage: npm run transfer-evm-to-arc -- <sourceChain> [amountUSDC] [destinationAddress]"
     );
+    console.error(`Example: npm run transfer-evm-to-arc -- baseSepolia 1`);
     console.error(
-      `Example: npm run transfer-arc-to-evm -- arcTestnet baseSepolia 1`
+      `Example: npm run transfer-evm-to-arc -- baseSepolia 0.5 0xRecipient...`
     );
-    console.error(`Valid chains: ${validChains.join(", ")}`);
+    console.error(`Valid source chains: ${validChains.join(", ")}`);
+    console.error(`Destination chain is always: ${DESTINATION_CHAIN}`);
     process.exit(1);
   }
-  const [source, destination, amountArg] = args as [
+  const [source, amountArg, destinationArg] = args as [
     ChainKey,
-    ChainKey,
+    string | undefined,
     string | undefined
   ];
   if (!validChains.includes(source)) {
@@ -64,16 +63,10 @@ function parseCli(): {
     );
     process.exit(1);
   }
-  if (!validChains.includes(destination)) {
+  if (source === DESTINATION_CHAIN) {
     console.error(
-      `Invalid destination chain: ${destination}. Valid: ${validChains.join(
-        ", "
-      )}`
+      `Source must not be ${DESTINATION_CHAIN} (destination is fixed).`
     );
-    process.exit(1);
-  }
-  if (source === destination) {
-    console.error("Source and destination must be different.");
     process.exit(1);
   }
   const amount = amountArg !== undefined ? parseFloat(amountArg) : 1;
@@ -82,7 +75,11 @@ function parseCli(): {
     process.exit(1);
   }
   const transferValue = BigInt(Math.round(amount * 10 ** USDC_DECIMALS));
-  return { source, destination, transferValue };
+  const destinationAddress =
+    destinationArg && ethers.isAddress(destinationArg)
+      ? ethers.getAddress(destinationArg)
+      : account;
+  return { source, transferValue, destinationAddress };
 }
 const MAX_FEE = 2_010000n;
 
@@ -190,18 +187,21 @@ function burnIntentTypedData(burnIntent: ReturnType<typeof createBurnIntent>) {
 async function main() {
   const {
     source: SOURCE_CHAIN,
-    destination: DESTINATION_CHAIN,
     transferValue,
+    destinationAddress,
   } = parseCli();
 
   console.log(`Account: ${account}`);
-  console.log(`Route: ${SOURCE_CHAIN} → ${DESTINATION_CHAIN}`);
+  console.log(`Route: ${SOURCE_CHAIN} → ${DESTINATION_CHAIN} (EVM → Arc)`);
   console.log(
-    `Amount: ${ethers.formatUnits(transferValue, USDC_DECIMALS)} USDC\n`
+    `Amount: ${ethers.formatUnits(transferValue, USDC_DECIMALS)} USDC`
   );
+  console.log(`Mint recipient on Arc: ${destinationAddress}\n`);
 
   const sourceConfig = chainConfigs[SOURCE_CHAIN];
   const destConfig = chainConfigs[DESTINATION_CHAIN];
+
+  console.log("Balances before transfer:");
 
   // —— Vault balances (before transfer) — sender and recipient chains
   await getVaultBalances({
@@ -216,7 +216,7 @@ async function main() {
     "Wallet balances (before transfer)"
   );
 
-  // —— 1. Optional: check unified Gateway balance (run `npm run balances` to see per-chain)
+  // —— 1. Check unified Gateway balance on source
   console.log("\nChecking unified Gateway balance...");
   const balanceRes = await fetch(
     "https://gateway-api-testnet.circle.com/v1/balances",
@@ -237,7 +237,7 @@ async function main() {
   const amountFormatted = Number(
     ethers.formatUnits(transferValue, USDC_DECIMALS)
   );
-  const required = amountFormatted + 0.01; // amount + small fee buffer
+  const required = amountFormatted + 0.01;
   console.log(
     `  ${SOURCE_CHAIN} Gateway balance: ${available.toFixed(6)} USDC`
   );
@@ -254,6 +254,9 @@ async function main() {
       const depositAmount = BigInt(Math.ceil(required * 10 ** 6));
       await depositToGateway([SOURCE_CHAIN], depositAmount, false);
       console.log(`\nDeposit successful!`);
+      console.log(
+        `Waiting for Gateway API to credit balance (can take ~2–20 min)...\n`
+      );
       await waitForGatewayBalance(SOURCE_CHAIN, required, {
         pollIntervalMs: 30_000,
         timeoutMs: 25 * 60 * 1000,
@@ -266,7 +269,19 @@ async function main() {
     }
   }
 
-  // —— 2. Create and sign burn intent (burn on source)
+  console.log("Balances after deposit:");
+  await getVaultBalances({
+    chains: [SOURCE_CHAIN, DESTINATION_CHAIN],
+    title: "Vault balances (after deposit)",
+  });
+
+  await logWalletBalances(
+    SOURCE_CHAIN,
+    DESTINATION_CHAIN,
+    "Wallet balances (after deposit)"
+  );
+
+  // —— 2. Create and sign burn intent (burn on source EVM)
   console.log(
     `\nCreating and signing burn intent (source: ${SOURCE_CHAIN})...`
   );
@@ -274,7 +289,8 @@ async function main() {
     SOURCE_CHAIN,
     DESTINATION_CHAIN,
     transferValue,
-    account
+    account,
+    destinationAddress
   );
   const typedData = burnIntentTypedData(intent);
   const signature = await wallet.signTypedData(
@@ -316,15 +332,15 @@ async function main() {
     throw new Error("Missing attestation or signature in response");
   }
 
-  // —— 4. Mint on destination (requires native token on destination for gas)
+  // —— 4. Mint on destination (Arc); requires native token on destination for gas
   console.log(`Minting on ${destConfig.chain.name} (${DESTINATION_CHAIN})...`);
   const destProvider = new ethers.JsonRpcProvider(destConfig.chain.rpcUrl);
-  const destWallet = wallet.connect(destProvider);
+  const signerWallet = wallet.connect(destProvider);
 
   const minter = new ethers.Contract(
     GATEWAY_MINTER_ADDRESS,
     gatewayMinterAbi,
-    destWallet
+    signerWallet
   );
 
   try {
@@ -335,9 +351,9 @@ async function main() {
       `\nMinted ${ethers.formatUnits(
         transferValue,
         USDC_DECIMALS
-      )} USDC on ${DESTINATION_CHAIN}`
+      )} USDC on ${DESTINATION_CHAIN} to ${destinationAddress}`
     );
-    console.log(`Tx hash: ${mintTx.hash}`);
+    console.log(`Mint tx hash: ${mintTx.hash}`);
 
     // —— Vault balances (after transfer) — sender and recipient chains
     await getVaultBalances({
@@ -355,9 +371,9 @@ async function main() {
     const code = (err as { code?: string })?.code;
     if (code === "INSUFFICIENT_FUNDS") {
       throw new Error(
-        `Insufficient native token (ETH) on ${DESTINATION_CHAIN} to pay for gas. ` +
-          `Your burn/attestation succeeded; you need a small amount of testnet ETH on the destination chain to complete the mint. ` +
-          `Faucets: Base Sepolia https://www.alchemy.com/faucets/base-sepolia | Console https://console.circle.com/faucet`
+        `Insufficient native token (ETH/USDC) on ${DESTINATION_CHAIN} to pay for gas. ` +
+          `Your burn/attestation succeeded; you need a small amount of testnet native token on the destination chain to complete the mint. ` +
+          `Arc Testnet: https://faucet.circle.com | Console https://console.circle.com/faucet`
       );
     }
     throw err;
