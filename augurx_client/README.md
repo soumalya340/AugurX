@@ -59,7 +59,7 @@ API server for cross-chain USDC transfers and prediction market interactions on 
 
 ### Prediction Market
 
-Interacts with the PredictionMarketFactory contract (`0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2`) on Arc Testnet.
+Interacts with the PredictionMarketFactory contract (`0x34797D579d3906fBB2bAA64D427728b9529AD4BD`) on Arc Testnet.
 
 #### Read Endpoints
 
@@ -81,18 +81,23 @@ Interacts with the PredictionMarketFactory contract (`0xa9975e74422e0A4b4dF9277a
 
 #### POST `/prediction-market/create-binary-market`
 
+**Requires API key** in the `x-api-key` header.
+
 ```json
+// Headers: { "x-api-key": "0xa1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" }
+
 {
   "question": "Will ETH hit $5000 by Dec 2025?",
   "outcomeYes": "Yes",
   "outcomeNo": "No",
   "resolutionTimeUnix": 1735689600,
   "initialB": "1000000000000000000",
-  "settlementAddress": "0x0000000000000000000000000000000000000000"
+  "settlementAddress": "0x0000000000000000000000000000000000000000",
+  "creatorAddress": "0x..."
 }
 ```
 
-Only `question` is required. All other fields have sensible defaults:
+`question` and `creatorAddress` are required. Other fields have sensible defaults:
 - `outcomeYes` / `outcomeNo` default to `"Yes"` / `"No"`
 - `resolutionTimeUnix` defaults to 1 year from now
 - `initialB` defaults to `1e18`

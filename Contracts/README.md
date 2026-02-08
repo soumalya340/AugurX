@@ -22,7 +22,7 @@ source .env && forge script script/DeployCrowdfund.s.sol:DeployCrowdfund \
 
 Deploys **PredictionMarketFactory** to Arc Testnet.
 
-**Deployed (Arc Testnet, chain 5042002):** `0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2`
+**Deployed (Arc Testnet, chain 5042002):** `0x34797D579d3906fBB2bAA64D427728b9529AD4BD`
 
 ```bash
 source .env && forge script script/DeployPredictionMarket.s.sol:DeployPredictionMarket \

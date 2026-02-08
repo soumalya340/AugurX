@@ -13,6 +13,7 @@ contract PredictionMarketFactory {
     // State variables
     mapping(uint256 => MarketInfo) public markets;
     mapping(address => bool) public authorizedCreators;
+    mapping(address => uint256) public userBalance;
     uint256 public marketCount;
 
     // Platform parameters
@@ -57,6 +58,9 @@ contract PredictionMarketFactory {
     // ═══════════════════════════════════════════════════════════════════════
     // MARKET CREATION FUNCTIONS
     // ═══════════════════════════════════════════════════════════════════════
+    constructor() {
+        owner = msg.sender;
+    }
 
     /**
      * @notice Create a binary Yes/No market
@@ -65,19 +69,25 @@ contract PredictionMarketFactory {
      * @param _resolutionTime Timestamp when market can be resolved
      * @param _initialB Initial liquidity parameter (can be small, grows adaptively)
      * @param _settlementLogic Address of settlement resolver contract
+     * @param _creator Address of the creator
      */
     function createBinaryMarket(
         string calldata _question,
         string[2] calldata _outcomeNames,
         uint256 _resolutionTime,
         uint256 _initialB,
-        address _settlementLogic
-    ) external payable returns (uint256 marketId, address marketAddress) {
-        require(msg.value >= creationFee, "Insufficient creation fee");
+        address _settlementLogic,
+        address _creator
+    )
+        external
+        payable
+        onlyOwner
+        returns (uint256 marketId, address marketAddress)
+    {
         require(_resolutionTime > block.timestamp, "Resolution must be future");
         require(
-            permissionlessCreation || authorizedCreators[msg.sender],
-            "Unauthorized creator"
+            userBalance[_creator] >= creationFee || _creator == owner,
+            "Insufficient balance"
         );
 
         marketId = marketCount++;
@@ -206,5 +216,10 @@ contract PredictionMarketFactory {
 
     function updateCreationFee(uint256 _newFee) external onlyOwner {
         creationFee = _newFee;
+    }
+
+    receive() external payable {
+        require(msg.value >= creationFee, "Insufficient creation fee");
+        userBalance[msg.sender] += msg.value;
     }
 }

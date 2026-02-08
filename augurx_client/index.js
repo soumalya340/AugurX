@@ -1,6 +1,6 @@
 // augurx_client/index.js
 
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
 import { ethers } from "ethers";
 import { readFileSync } from "fs";
@@ -12,9 +12,11 @@ import {
   executeWithSignature,
 } from "./utilities/transfer/unified_signed_transfer.ts";
 
-// --- PredictionMarketFactory setup ---
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PM_CONTRACT_ADDRESS = "0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2";
+dotenv.config({ path: join(__dirname, ".env") });
+
+// --- PredictionMarketFactory setup ---
+const PM_CONTRACT_ADDRESS = "0x34797D579d3906fBB2bAA64D427728b9529AD4BD";
 const ARC_TESTNET_RPC = "https://rpc.testnet.arc.network";
 const ARC_CHAIN_ID = 5042002;
 
@@ -227,8 +229,12 @@ app.get("/prediction-market/markets/:marketId", async (req, res) => {
 
 // --- Prediction Market WRITE endpoint ---
 
+const PM_API_KEY = "0xa1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+
 /**
  * POST /prediction-market/create-binary-market
+ *
+ * Headers: { "x-api-key": "0xa1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" }
  *
  * Body: {
  *   "question": "Will ETH hit $5000 by Dec 2025?",
@@ -236,18 +242,28 @@ app.get("/prediction-market/markets/:marketId", async (req, res) => {
  *   "outcomeNo": "No",
  *   "resolutionTimeUnix": 1735689600,
  *   "initialB": "1000000000000000000",
- *   "settlementAddress": "0x0000000000000000000000000000000000000000"
+ *   "settlementAddress": "0x0000000000000000000000000000000000000000",
+ *   "creatorAddress": "0x48eE6eda30eAbA8D1308bb6A8371C4DF519F69C4"  // optional; on-chain creator is the signer (msg.sender)
  * }
  */
 app.post("/prediction-market/create-binary-market", async (req, res) => {
+  const apiKey = req.headers["x-api-key"];
+  if (apiKey !== PM_API_KEY) {
+    return res.status(401).json({ error: "Unauthorized: invalid or missing x-api-key" });
+  }
+
   if (!pmSigner) {
     return res.status(503).json({ error: "EVM_PRIVATE_KEY not configured" });
   }
 
-  const { question, outcomeYes, outcomeNo, resolutionTimeUnix, initialB, settlementAddress } = req.body;
+  const { question, outcomeYes, outcomeNo, resolutionTimeUnix, initialB, settlementAddress, creatorAddress } = req.body;
 
   if (!question) {
     return res.status(400).json({ error: "question is required" });
+  }
+
+  if (!creatorAddress || !ethers.isAddress(creatorAddress)) {
+    return res.status(400).json({ error: "Valid creatorAddress is required" });
   }
 
   const yesLabel = outcomeYes || "Yes";
@@ -264,19 +280,13 @@ app.post("/prediction-market/create-binary-market", async (req, res) => {
   }
 
   try {
-    const requiredFeeWei = await pmContract.creationFee();
-    let valueWei = ethers.parseEther("1");
-    if (valueWei < requiredFeeWei) {
-      valueWei = requiredFeeWei;
-    }
-
     const tx = await pmContract.createBinaryMarket(
       question,
       [yesLabel, noLabel],
       resolutionTime,
       initialBWei,
       settlement,
-      { value: valueWei }
+      creatorAddress,
     );
     console.log("CreateBinaryMarket tx:", tx.hash);
     const receipt = await tx.wait();
@@ -296,8 +306,17 @@ app.post("/prediction-market/create-binary-market", async (req, res) => {
 
     res.json(result);
   } catch (err) {
+    const msg = err?.reason || err?.shortMessage || err?.message || "";
     console.error("createBinaryMarket failed:", err);
-    res.status(500).json({ error: err?.message || "Failed to create binary market" });
+    if (msg.includes("Only owner can call this function")) {
+      const owner = await pmContract.owner().catch(() => null);
+      return res.status(403).json({
+        error: "Only the factory owner can create markets",
+        factoryOwner: owner,
+        signerAddress: pmSigner.address,
+      });
+    }
+    res.status(500).json({ error: msg || "Failed to create binary market" });
   }
 });
 

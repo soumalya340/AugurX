@@ -10,19 +10,24 @@
  *   node PredictionMarket_interact.js permissionlessCreation
  *   node PredictionMarket_interact.js authorizedCreators [address]
  *   node PredictionMarket_interact.js markets [marketId]
- *   node PredictionMarket_interact.js createBinaryMarket <question> <outcomeYes> <outcomeNo> <resolutionTimeUnix> <initialB> <settlementAddress> [valueInEther]
+ *   node PredictionMarket_interact.js createBinaryMarket <question> <outcomeYes> <outcomeNo> <resolutionTimeUnix> <initialB> <settlementAddress>
+ *   (value sent is 1 ETH or contract creation fee if higher; on-chain creator = signer = EVM_PRIVATE_KEY)
+ *
+ * Example (creator will be signer address, set EVM_PRIVATE_KEY to 0x48eE... to use that as creator):
+ *   node utilities/call_contracts/PredictionMarket_interact.js createBinaryMarket "Will ETH hit $5000 by Dec 2025?" "Yes" "No" 1767225600 1000000000000000000 0x0000000000000000000000000000000000000000
  */
 
-import "dotenv/config";
+import dotenv from "dotenv";
 import { ethers } from "ethers";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+dotenv.config();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Set your deployed PredictionMarketFactory address
-const CONTRACT_ADDRESS = "0xa9975e74422e0A4b4dF9277aB1FE595a1902a2d2";
+const CONTRACT_ADDRESS = "0x34797D579d3906fBB2bAA64D427728b9529AD4BD";
 const ARC_TESTNET_RPC = "https://rpc.testnet.arc.network";
 const CHAIN_ID = 5042002;
 
@@ -82,12 +87,6 @@ async function main() {
         return;
     }
 
-    if (action === "permissionlesscreation") {
-        const allowed = await contract.permissionlessCreation();
-        console.log("Permissionless creation:", allowed);
-        return;
-    }
-
     if (action === "authorizedcreators") {
         const address = args[1] || signer.address;
         const authorized = await contract.authorizedCreators(address);
@@ -117,20 +116,7 @@ async function main() {
         let resolutionTimeUnix = args[4] ?? String(oneYearFromNow);
         const initialB = args[5] ?? "1000000000000000000"; // 1e18
         const settlementAddress = args[6] ?? ethers.ZeroAddress;
-        const valueEthArg = "1"; // 1 ETH constant
-
-        const requiredFeeWei = await contract.creationFee();
-        let valueWei;
-        if (valueEthArg !== undefined && valueEthArg !== "") {
-            valueWei = ethers.parseEther(String(valueEthArg));
-            if (valueWei < requiredFeeWei) {
-                console.error("Insufficient value: creation fee is", ethers.formatEther(requiredFeeWei), "ETH. Using that amount.");
-                valueWei = requiredFeeWei;
-            }
-        } else {
-            valueWei = requiredFeeWei;
-            console.log("Using creation fee:", ethers.formatEther(valueWei), "ETH");
-        }
+        const creatorAddress = args[7] ?? signer.address;
 
         // Contract requires "Resolution must be future" — ensure resolution time is after now
         const nowSec = Math.floor(Date.now() / 1000);
@@ -142,27 +128,43 @@ async function main() {
         const resolutionTime = BigInt(resolutionTimeUnix);
         const initialBWei = BigInt(initialB);
 
-        const tx = await contract.createBinaryMarket(
-            question,
-            [outcomeYes, outcomeNo],
-            resolutionTime,
-            initialBWei,
-            settlementAddress,
-            { value: valueWei }
-        );
-        console.log("CreateBinaryMarket tx:", tx.hash);
-        const receipt = await tx.wait();
-        console.log("Confirmed in block:", receipt.blockNumber);
+        console.log("Creator (signer / msg.sender):", signer.address);
 
-        // Try to get MarketCreated event
-        const iface = contract.interface;
-        for (const log of receipt.logs) {
-            try {
-                const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-                if (parsed && parsed.name === "MarketCreated") {
-                    console.log("MarketCreated — marketId:", parsed.args.marketId.toString(), "marketAddress:", parsed.args.marketAddress);
-                }
-            } catch (_) { }
+        try {
+            const tx = await contract.createBinaryMarket(
+                question,
+                [outcomeYes, outcomeNo],
+                resolutionTime,
+                initialBWei,
+                settlementAddress,
+                creatorAddress,
+            );
+            console.log("CreateBinaryMarket tx:", tx.hash);
+            const receipt = await tx.wait();
+            console.log("Confirmed in block:", receipt.blockNumber);
+
+            // Try to get MarketCreated event
+            const iface = contract.interface;
+            for (const log of receipt.logs) {
+                try {
+                    const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+                    if (parsed && parsed.name === "MarketCreated") {
+                        console.log("MarketCreated — marketId:", parsed.args.marketId.toString(), "marketAddress:", parsed.args.marketAddress);
+                    }
+                } catch (_) { }
+            }
+        } catch (err) {
+            const msg = err?.reason || err?.shortMessage || err?.message || "";
+            if (msg.includes("Only owner can call this function")) {
+                const owner = await contract.owner().catch(() => null);
+                console.error("Error: Only the factory owner can create markets.");
+                if (owner) console.error("Factory owner:", owner);
+                console.error("Your address:", signer.address);
+                console.error("Use EVM_PRIVATE_KEY for the owner wallet.");
+                console.error("Check owner: node utilities/call_contracts/PredictionMarket_interact.js owner");
+                process.exit(1);
+            }
+            throw err;
         }
         return;
     }
@@ -175,7 +177,7 @@ async function main() {
     console.error("  node PredictionMarket_interact.js permissionlessCreation");
     console.error("  node PredictionMarket_interact.js authorizedCreators [address]");
     console.error("  node PredictionMarket_interact.js markets [marketId]");
-    console.error("  node PredictionMarket_interact.js createBinaryMarket <question> <outcomeYes> <outcomeNo> <resolutionTimeUnix> <initialB> <settlementAddress> [valueInEther]");
+    console.error("  node PredictionMarket_interact.js createBinaryMarket <question> <outcomeYes> <outcomeNo> <resolutionTimeUnix> <initialB> <settlementAddress>");
     process.exit(1);
 }
 
